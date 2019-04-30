@@ -1,0 +1,2 @@
+META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat
+com/infiniters/aws/cloudwatch/CloudWatchAppender.class
