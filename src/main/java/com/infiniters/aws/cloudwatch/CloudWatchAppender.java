@@ -37,6 +37,7 @@ import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.config.plugins.PluginFactory;
 
+
 @Plugin(name = "CloudWatchAppender", category = "Core", elementType = "appender", printObject = true)
 class CloudWatchAppender extends AbstractAppender {
     public String awsAccessKey, awsSecretKey, awsRegion, awsCloudWatchGroupName, awsCloudWatchStreamName, awsS3BucketName;
@@ -47,6 +48,7 @@ class CloudWatchAppender extends AbstractAppender {
     private static volatile Boolean inflight = false;
     private static volatile List<InputLogEvent> logEvents = new ArrayList();
     private static volatile List<InputLogEvent> s3Events = new ArrayList();
+    private static final Logger LOGGER = Logger.getLogger( CloudWatchAppender.class.getName() );
     private static CloudWatchAppender instance;
     public CloudWatchAppender(String name, Filter filter, Layout<? extends Serializable> layout, String awsAccessKey,
                               String awsSecretKey, String awsRegion, String awsCloudWatchGroupName, String awsCloudWatchStreamName, String awsS3BucketName) {
@@ -64,7 +66,7 @@ class CloudWatchAppender extends AbstractAppender {
             this.awsRegion = "us-east-1";
         } else
             this.awsRegion = awsRegion;
-        System.out.println("in constructor");
+        System.out.println("AWS CloudWatch Log: In Constructor");
         this.awsCreds = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
         this.cwClient = (AWSLogsClient) AWSLogsClientBuilder.standard()
                 .withCredentials(new AWSStaticCredentialsProvider(this.awsCreds))
@@ -87,7 +89,7 @@ class CloudWatchAppender extends AbstractAppender {
             this.s3Client.putObject(awsS3BucketName, stringObjKeyName, String.valueOf(s3Events));
             s3Response = this.s3Client.getUrl(awsS3BucketName, stringObjKeyName);
             CloudWatchAppender.s3Events.removeAll(s3Events);
-            System.out.println("AWS S3 payload URL :" + s3Response);
+            System.out.println("AWS CloudWatch Log: AWS S3 payload URL :" + s3Response);
         }
         catch(AmazonServiceException e) {
             e.printStackTrace();
@@ -96,16 +98,13 @@ class CloudWatchAppender extends AbstractAppender {
             e.printStackTrace();
         }
         catch (Exception e) {
-            System.out.println("Error occurred in writeToS3");
-            System.out.println("Error Message: " + e.getMessage());
+            System.out.println("AWS CloudWatch Log: Error occurred in writeToS3");
+            System.out.println("AWS CloudWatch Log: Error Message: " + e.getMessage());
             CloudWatchAppender.s3Events.removeAll(s3Events);
         }
     }
 
     private synchronized void writeToCloud() throws InterruptedException {
-
-        try {
-
 
         if (!CloudWatchAppender.logEvents.isEmpty() && CloudWatchAppender.inflight == false) {
             CloudWatchAppender.inflight = true;
@@ -122,19 +121,15 @@ class CloudWatchAppender extends AbstractAppender {
         } else {
             if (CloudWatchAppender.inflight == false) {
                 try {
-                    System.out.println("in else block waiting for thread to release");
+                    System.out.println("AWS CloudWatch Log: in else block waiting for thread to release");
                     synchronized (this.awsWriteThread) {
                         this.awsWriteThread.wait();
                     }
-                } catch (InterruptedException ex) {
-                    System.out.println("Error occurred in writeToCloud");
-                    Logger.getLogger(CloudWatchAppender.class.getName()).log(Level.SEVERE, null, ex);
+                } catch (Exception ec) {
+                    System.out.println("AWS CloudWatch Log: Error occurred in writeToCloud else Block");
+                    Logger.getLogger(CloudWatchAppender.class.getName()).log(Level.SEVERE, null, ec.getMessage());
                 }
             }
-        }
-        } catch (Exception e) {
-            System.out.println("Error occurred in writeToCloud");
-            System.out.println("Error Message: " + e.getMessage());
         }
 
     }
@@ -142,11 +137,16 @@ class CloudWatchAppender extends AbstractAppender {
         Date date = new Date();
         DateFormat dateFormat = new SimpleDateFormat("yyyyMMdd");
         String strDate = dateFormat.format(date);
+        try {
+            Thread.sleep(200);
+        } catch (Exception e) {
+            System.out.println("AWS CloudWatch Log: Error occurred in getUploadSequenceToken" + e.getMessage());
+        }
         DescribeLogStreamsRequest req = new DescribeLogStreamsRequest().withLogGroupName(awsCloudWatchGroupName).withLogStreamNamePrefix(awsCloudWatchStreamName + "-" + strDate);
         DescribeLogStreamsResult res = this.cwClient.describeLogStreams(req);
 
         if (res.getLogStreams().isEmpty()) {
-            System.out.println("Creating New AWS Stream");
+            System.out.println("AWS CloudWatch Log: Creating New AWS Stream");
             CreateLogStreamRequest createReq = new CreateLogStreamRequest().withLogGroupName(awsCloudWatchGroupName).withLogStreamName(awsCloudWatchStreamName + "-" + strDate);
             CreateLogStreamResult createRes = this.cwClient.createLogStream(createReq);
 
@@ -168,37 +168,53 @@ class CloudWatchAppender extends AbstractAppender {
 
                 InputLogEvent logEvent1 = new InputLogEvent().withMessage(logEvent.getLevel().name() + " : " + result + " : " + logEvent.getMessage().getFormattedMessage()).withTimestamp(System.currentTimeMillis());
                 logEvents.add(logEvent1);
-                this.writeToCloud();
+                try {
+                    this.writeToCloud();
+                } catch (Exception  ex) {
+                    LOGGER.log(Level.SEVERE, "AWS CloudWatch Log: Error occurred in WriteToCloud! retrying");
+                    LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Error Message:" + ex);
+                    CloudWatchAppender.inflight = false;
+                    this.writeToCloud();
+                }
 
             } else {
-                System.out.println("payload is too long to log, so sending it to S3");
+                System.out.println("AWS CloudWatch Log: Payload is too long to log, so sending it to S3");
                 InputLogEvent logEvent1 = new InputLogEvent().withMessage(logEvent.getLevel().name() + " : " + result + " : " + logEvent.getMessage().getFormattedMessage().substring(0, 200000)).withTimestamp(System.currentTimeMillis());
                 logEvents.add(logEvent1);
                 InputLogEvent logEvent2 = new InputLogEvent().withMessage(logEvent.getLevel().name() + " : " + result + " : " + logEvent.getMessage().getFormattedMessage()).withTimestamp(System.currentTimeMillis());
                 s3Events.add(logEvent2);
-                this.writeToCloud();
+                try {
+                    this.writeToCloud();
+                } catch (Exception  ex) {
+                    LOGGER.log(Level.SEVERE, "AWS CloudWatch Log: Error occurred in WriteToCloud! retrying");
+                    LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Error Message:" + ex);
+                    CloudWatchAppender.inflight = false;
+                    this.writeToCloud();
+                }
                 this.writeToS3();
             }
 
-
-
-        } catch (InvalidSequenceTokenException invalidToken){
-                System.out.println("Invalid Token Exception occurred: " + invalidToken);
-                System.out.println("next expected Sequence Token: " + invalidToken.getExpectedSequenceToken());
+        } catch (InvalidSequenceTokenException invalidToken) {
+            LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Invalid Token Exception occurred: " + invalidToken);
+            LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Next expected Sequence Token: " + invalidToken.getExpectedSequenceToken());
             try {
+                CloudWatchAppender.inflight = false;
                 this.writeToCloud();
-            } catch (InterruptedException e) {
-                try {
-                    this.writeToCloud();
-                } catch (InterruptedException ex) {
-                    ex.printStackTrace();
-                }
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: AWS WriteToCloud Interrupted");
+                LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Error Message:" + e.getMessage());
                 e.printStackTrace();
             }
         }
         catch (Exception e) {
 
-            System.out.println("Error Message: " + e.getMessage());
+            LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Error Message: " + e.getMessage());
+            LOGGER.log(Level.SEVERE,"AWS CloudWatch Log: Calling WriteToCloud again");
+            try {
+                this.writeToCloud();
+            } catch (InterruptedException ex) {
+                ex.printStackTrace();
+            }
         }
     }
 
@@ -260,7 +276,7 @@ class CloudWatchAppender extends AbstractAppender {
                                                     @PluginAttribute("awsCloudWatchStreamName") String awsCloudWatchStreamName,
                                                     @PluginAttribute("awsS3BucketName") String awsS3BucketName,
                                                     @PluginAttribute("awsRegion") String awsRegion) {
-        System.out.println("Initializing Cloud Watch Log4j2 Appender");
+        System.out.println("AWS CloudWatch Log: Initializing Cloud Watch Log4j2 Appender");
         return new CloudWatchAppender(name, filter, layout, awsAccessKey, awsSecretKey, awsRegion, awsCloudWatchGroupName, awsCloudWatchStreamName, awsS3BucketName );
     }
 }
